@@ -9,42 +9,75 @@ import (
   "synbioz/quarto"
 )
 
+type Message []byte
 type Request struct {
   Game quarto.Game
-  Callback string
+  Index uint8
 }
 
-type Message []byte
+func readMessage(message Message) (*Request) {
+  var request *Request = new(Request)
+  var reader  *bytes.Reader = bytes.NewReader(message)
 
-func ReadBytes(messageBytes []byte) (*quarto.Game, uint8) {
-  var i, j       uint8
-  var pieceIndex uint8
-  var game       *quarto.Game  = new(quarto.Game)
-  var reader     *bytes.Reader = bytes.NewReader(messageBytes)
+  binary.Read(reader, binary.LittleEndian, request)
 
-  // Read board
-  for i = 0; i < 4; i++ {
-    for j = 0; j < 4; j++ {
-      binary.Read(reader, binary.LittleEndian, &(game.Board[i][j]))
+  return request
+}
+
+func handleRequest(request *Request) Message {
+  if request.Game.IsWinning() {
+    return Message{0}
+  } else {
+    move, win := request.Game.PlayWith(request.Index)
+    i, j, k   := move.ToRepr()
+
+    if win {
+      return Message{2, i, j, k}
+    } else {
+      return Message{1, i, j, k}
     }
   }
-
-  // Read stash
-  for i = 0; i < 16; i++ {
-    binary.Read(reader, binary.LittleEndian, &(game.Stash[i]))
-  }
-
-  // Read pieceIndex
-  binary.Read(reader, binary.LittleEndian, &pieceIndex)
-
-  return game, pieceIndex
 }
 
-// you can use the followin parameters:
-// - protocol -> 'tcp'
-// - laddr    -> ':4567'
-func Server(protocol, laddr string) {
-  ln, err := net.Listen(protocol, laddr)
+func (request *Request) isValid() bool {
+  return request.Game.Stash[request.Index] != quarto.PIECE_EMPTY
+}
+
+// Read with timeout, then build a request and compute and send a response
+// to the client.
+//
+// Data: < Board serialization >< Stash serialization >< Piece index >
+// Size: <     16 * Piece      ><     16 * Piece      ><     uint8   >
+// Size in byte is: 33
+func handleConnection(conn net.Conn) {
+  defer conn.Close()
+
+  // Set a timeout 10 seconds from the connection
+  timeout := time.Now().Add(time.Second * 10)
+  conn.SetDeadline(timeout)
+
+  msg := make(Message, 33)
+  _, err := conn.Read(msg)
+
+  // Error handling
+  if err != nil {
+    if err.(net.Error).Timeout() {
+      fmt.Print("Read timeout, closing connection.\n")
+    } else {
+      fmt.Printf("Error while reading: %s\n", err.Error())
+    }
+    return
+  }
+
+  request := readMessage(msg)
+  if request.isValid() {
+    response := handleRequest(request)
+    conn.Write(response)
+  }
+}
+
+func main() {
+  ln, err  := net.Listen("tcp", ":1234")
 
   if err != nil {
     fmt.Printf("Error while openning the server: %s\n", err.Error())
@@ -63,64 +96,4 @@ func Server(protocol, laddr string) {
 
     go handleConnection(conn)
   }
-}
-
-// Data: < Board serialization >< Stash serialization >< Piece index >
-// Size: <     16 * Piece      ><     16 * Piece      ><     uint8   >
-// Size in byte is: 33
-func handleConnection(conn net.Conn) {
-  defer conn.Close()
-
-  // Define the timeout of the handled connection
-  start   := time.Now()
-  timeout := start.Add(time.Second * 10)
-  conn.SetDeadline(timeout)
-
-  buf := make([]byte, 33)
-  _, err := conn.Read(buf)
-  if err != nil {
-    if err.(net.Error).Timeout() == true {
-      fmt.Print("Read timeout, closing connection.\n")
-    } else {
-      fmt.Printf("Error while reading: %s\n", err.Error())
-    }
-  }
-
-  game, pieceIndex := ReadBytes(buf)
-
-  if game.Stash[pieceIndex] != quarto.PIECE_EMPTY {
-    if game.IsWinning() {
-      conn.Write([]byte{0})
-    } else {
-      move, win := game.PlayWith(pieceIndex)
-      i, j, k   := move.ToRepr()
-
-      if win {
-        conn.Write([]byte{2, i, j, k})
-      } else {
-        conn.Write([]byte{1, i, j, k})
-      }
-    }
-  }
-
-  // Debug stash
-  // fmt.Print("Stash: [")
-  // for _, piece := range game.Stash {
-  //   fmt.Printf("%3d, ", piece)
-  // }
-  // fmt.Print("]\n")
-
-  // Debug board
-  // fmt.Print("Board:\n")
-  // for _, line := range game.Board {
-  //   for _, piece := range line {
-  //     fmt.Printf("| %3d ", piece)
-  //   }
-  //   fmt.Print("\n")
-  // }
-
-}
-
-func main() {
-  Server("tcp", ":1234")
 }
